@@ -41,3 +41,20 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+app.get('/balance', async (req, res) => {
+  try {
+    const tokenAbi = [
+      "function balanceOf(address) view returns (uint256)",
+      "function decimals() view returns (uint8)"
+    ];
+    const contract = new ethers.Contract(tokenAddress, tokenAbi, provider);
+    const balance = await contract.balanceOf(wallet.address);
+    const decimals = await contract.decimals();
+    const formatted = ethers.utils.formatUnits(balance, decimals);
+    res.json({ balance: formatted });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not fetch token balance' });
+  }
+});
+
