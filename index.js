@@ -63,6 +63,21 @@ const DAILY_LIMIT = 1; // max 1 token çekebilir
 const playerRecords = {}; // { walletAddress: { lastClaim, totalClaimed } }
 
 app.post('/claim', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const { wallet, score } = req.body;
+
+  if (!wallet || !score || isNaN(score)) {
+    return res.status(400).json({ error: 'Missing wallet or score' });
+  }
+
+  const now = Date.now();
+
+  // IP üzerinden spam koruma (her 60 saniyede 1 kez)
+  if (ipRecords[ip] && now - ipRecords[ip] < 60 * 1000) {
+    return res.status(429).json({ error: 'Too many requests from your IP. Wait a bit.' });
+  }
+  ipRecords[ip] = now;
+
   const { wallet, score } = req.body;
 
   if (!wallet || !score || isNaN(score)) {
