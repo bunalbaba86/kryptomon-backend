@@ -1,1 +1,1 @@
-if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, JSON.stringify([]));
+[]
