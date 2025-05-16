@@ -1,3 +1,5 @@
+const playerRecords = {}; // { walletAddress: { lastClaim, totalClaimed } }
+const ipRecords = {};     // { ip: timestamp }
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
