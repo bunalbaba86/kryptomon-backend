@@ -9,7 +9,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 📌 Blockchain bağlantısı
 const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 const tokenAddress = process.env.TOKEN_ADDRESS;
@@ -21,25 +20,28 @@ const tokenAbi = [
 ];
 const contract = new ethers.Contract(tokenAddress, tokenAbi, wallet);
 
-// 📌 Kayıtlar bellekte tutulur
-let playerRecords = {}; // { wallet: { lastClaim, totalClaimed } }
-let ipRecords = {};     // { ip: timestamp }
-const DAILY_LIMIT = 0.1;
-const LOG_FILE = 'logs.json';
+// Bellekte kayıtlar
+let playerRecords = {};   // /claim için: { wallet: { lastClaim, totalClaimed } }
+let withdrawRecords = {}; // /withdraw için: { wallet: { lastWithdraw, totalWithdrawn } }
+let ipRecords = {};       // IP spam için
 
-// İlk çalışmada log dosyası oluştur
+const CLAIM_LIMIT = 0.1;
+const WITHDRAW_LIMIT = 0.1;
+
+const LOG_FILE = 'logs.json';
 if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, JSON.stringify([]));
 
-// 🕐 Her gece 00:00'da günlük limitleri sıfırla
+// Her gece 00:00 resetle
 cron.schedule('0 0 * * *', () => {
   playerRecords = {};
+  withdrawRecords = {};
   ipRecords = {};
-  console.log('🔁 Daily limits reset.');
+  console.log('🔁 Günlük limitler sıfırlandı.');
 }, {
   timezone: 'Europe/Istanbul'
 });
 
-// 🎯 Token bakiyesi
+// ✅ Token bakiyesi (hazine)
 app.get('/balance', async (req, res) => {
   try {
     const balance = await contract.balanceOf(wallet.address);
@@ -52,28 +54,7 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// 🎁 Token çekme (withdraw)
-app.post('/withdraw', async (req, res) => {
-  const { to, amount } = req.body;
-  if (!to || !amount) {
-    return res.status(400).json({ error: 'Missing "to" or "amount"' });
-  }
-
-  try {
-    const parsed = ethers.utils.parseUnits(amount.toString(), 18);
-    const tx = await contract.transfer(to, parsed, {
-      maxFeePerGas: ethers.utils.parseUnits('50', 'gwei'),
-      maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei')
-    });
-    await tx.wait();
-    res.json({ status: 'success', txHash: tx.hash });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Transfer failed', details: err.message });
-  }
-});
-
-// 🎮 Puanla claim etme (maks. 0.1 Z1N3D/gün)
+// 🎮 Claim endpoint (score ile token kazancı)
 app.post('/claim', async (req, res) => {
   const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
   const { wallet, score } = req.body;
@@ -84,22 +65,22 @@ app.post('/claim', async (req, res) => {
 
   const now = Date.now();
 
-  // IP koruması: 1 dakikada bir
+  // IP spam kontrolü
   if (ipRecords[ip] && now - ipRecords[ip] < 60 * 1000) {
     return res.status(429).json({ error: 'Too many requests from your IP. Please wait.' });
   }
   ipRecords[ip] = now;
 
-  // Günlük geçmiş kontrolü
   const record = playerRecords[wallet] || { lastClaim: 0, totalClaimed: 0 };
+
   if (now - record.lastClaim < 60 * 60 * 1000) {
     return res.status(429).json({ error: 'Please wait before claiming again (1 hour cooldown).' });
   }
 
   const tokensToSend = (score / 10000).toFixed(4);
   const total = parseFloat(record.totalClaimed) + parseFloat(tokensToSend);
-  if (total > DAILY_LIMIT) {
-    return res.status(403).json({ error: 'Daily limit exceeded (max 0.1 Z1N3D/day).' });
+  if (total > CLAIM_LIMIT) {
+    return res.status(403).json({ error: 'Daily claim limit exceeded (max 0.1 Z1N3D/day).' });
   }
 
   const parsedAmount = ethers.utils.parseUnits(tokensToSend, 18);
@@ -119,6 +100,7 @@ app.post('/claim', async (req, res) => {
 
     const logs = JSON.parse(fs.readFileSync(LOG_FILE));
     logs.push({
+      type: 'claim',
       wallet,
       ip,
       tokens: tokensToSend,
@@ -136,12 +118,61 @@ app.post('/claim', async (req, res) => {
   }
 });
 
-// 🧾 Sadece günlük claim geçmişi
+// 🎁 Token çekme (withdraw)
+app.post('/withdraw', async (req, res) => {
+  const { to, amount } = req.body;
+  if (!to || !amount) {
+    return res.status(400).json({ error: 'Missing "to" or "amount"' });
+  }
+
+  const now = Date.now();
+  const record = withdrawRecords[to] || { lastWithdraw: 0, totalWithdrawn: 0 };
+
+  if (now - record.lastWithdraw < 60 * 60 * 1000) {
+    return res.status(429).json({ error: 'Please wait before withdrawing again (1 hour cooldown).' });
+  }
+
+  const total = parseFloat(record.totalWithdrawn) + parseFloat(amount);
+  if (total > WITHDRAW_LIMIT) {
+    return res.status(403).json({ error: 'Daily withdraw limit exceeded (max 0.1 Z1N3D/day).' });
+  }
+
+  try {
+    const parsed = ethers.utils.parseUnits(amount.toString(), 18);
+    const tx = await contract.transfer(to, parsed, {
+      maxFeePerGas: ethers.utils.parseUnits('50', 'gwei'),
+      maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei')
+    });
+    await tx.wait();
+
+    withdrawRecords[to] = {
+      lastWithdraw: now,
+      totalWithdrawn: total.toFixed(4)
+    };
+
+    const logs = JSON.parse(fs.readFileSync(LOG_FILE));
+    logs.push({
+      type: 'withdraw',
+      wallet: to,
+      tokens: amount,
+      txHash: tx.hash,
+      time: new Date().toISOString()
+    });
+    fs.writeFileSync(LOG_FILE, JSON.stringify(logs, null, 2));
+
+    res.json({ status: 'success', txHash: tx.hash });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Transfer failed', details: err.message });
+  }
+});
+
+// 📄 Günlük claim geçmişi
 app.get('/claim-log', (req, res) => {
   res.json(playerRecords);
 });
 
-// 🗂️ Tüm işlemlerin logları
+// 🗂️ Admin logları
 app.get('/admin', (req, res) => {
   try {
     const logs = JSON.parse(fs.readFileSync(LOG_FILE));
@@ -151,7 +182,7 @@ app.get('/admin', (req, res) => {
   }
 });
 
-// ✅ Sunucu başlat
+// ✅ Sunucuyu başlat
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
